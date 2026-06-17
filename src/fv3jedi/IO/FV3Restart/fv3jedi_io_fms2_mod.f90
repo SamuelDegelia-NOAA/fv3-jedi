@@ -1531,11 +1531,15 @@ integer(kind=4) :: mold4(1)
 integer(kind=8) :: mold8(1)
 character(len=32) :: chksum
 character(len=:), allocatable :: ua_name, va_name
+character(len=:), allocatable :: core_filename
 real(kind=kind_real), pointer :: ua_ana(:,:,:), va_ana(:,:,:)
 real(kind=kind_real), allocatable :: ua_bkg(:,:,:), va_bkg(:,:,:), dua(:,:,:), dva(:,:,:)
 real(kind=kind_real), allocatable :: ud_bkg(:,:,:), vd_bkg(:,:,:), dud(:,:,:), dvd(:,:,:)
 real(kind=kind_real), allocatable :: ud_out(:,:,:), vd_out(:,:,:)
 integer :: varid_ua, varid_va, varid_u, varid_v
+integer :: ncid_core
+integer :: core_fileid
+logical :: update_d_wind_restart
 
 character(len=72), allocatable :: tmp_names(:)
 integer,           allocatable :: tmp_d1(:), tmp_d2(:), tmp_d3(:)
@@ -2137,7 +2141,87 @@ end do ! Outer batch loop
 ! Create files using a single rank
 ! --------------------------------
 !tb = MPI_Wtime()
+update_d_wind_restart = self%write_into_existing_files .and. self%l_D_wind_restart_output
+core_fileid = 0
+if (update_d_wind_restart) then
+  if (.not. hasfield(fields, 'eastward_wind') .or. .not. hasfield(fields, 'northward_wind')) then
+    call abor1_ftn('fv3jedi_io_fms_mod.write_restart_all_reg: l_D_wind_restart_output requires eastward_wind and northward_wind')
+  endif
+  core_filename = trim(self%datapath)//'/'//trim(self%filenames(self%index_core))
+  do i = 1, totalnumfiles
+    if (trim(FileNamesToProcess(i)) == trim(core_filename)) core_fileid = i
+  enddo
+  if (core_fileid <= 0) then
+    call abor1_ftn('fv3jedi_io_fms_mod.write_restart_all_reg: fv_core file is not selected for D-wind restart output')
+  endif
+
+  ua_name = ioname('eastward_wind', field_io_names)
+  va_name = ioname('northward_wind', field_io_names)
+  call get_field(fields, 'eastward_wind', ua_ana)
+  call get_field(fields, 'northward_wind', va_ana)
+
+  if (allocated(ua_bkg)) deallocate(ua_bkg)
+  if (allocated(va_bkg)) deallocate(va_bkg)
+  if (allocated(dua))    deallocate(dua)
+  if (allocated(dva))    deallocate(dva)
+  if (allocated(ud_bkg)) deallocate(ud_bkg)
+  if (allocated(vd_bkg)) deallocate(vd_bkg)
+  if (allocated(dud))    deallocate(dud)
+  if (allocated(dvd))    deallocate(dvd)
+  if (allocated(ud_out)) deallocate(ud_out)
+  if (allocated(vd_out)) deallocate(vd_out)
+
+  allocate(ua_bkg(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  allocate(va_bkg(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  allocate(dua   (geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  allocate(dva   (geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  allocate(ud_bkg(geom%isc:geom%iec,   geom%jsc:geom%jec+1, geom%npz))
+  allocate(vd_bkg(geom%isc:geom%iec+1, geom%jsc:geom%jec,   geom%npz))
+  allocate(dud   (geom%isc:geom%iec,   geom%jsc:geom%jec+1, geom%npz))
+  allocate(dvd   (geom%isc:geom%iec+1, geom%jsc:geom%jec,   geom%npz))
+  allocate(ud_out(geom%isc:geom%iec,   geom%jsc:geom%jec+1, geom%npz))
+  allocate(vd_out(geom%isc:geom%iec+1, geom%jsc:geom%jec,   geom%npz))
+
+  start    = (/ geom%isc, geom%jsc, 1 /)
+  counts   = (/ size(ua_bkg,1), size(ua_bkg,2), size(ua_bkg,3) /)
+  start_u  = (/ geom%isc, geom%jsc, 1 /)
+  counts_u = (/ size(ud_bkg,1), size(ud_bkg,2), size(ud_bkg,3) /)
+  start_v  = (/ geom%isc, geom%jsc, 1 /)
+  counts_v = (/ size(vd_bkg,1), size(vd_bkg,2), size(vd_bkg,3) /)
+
+  call check(nf90_open(trim(core_filename), ior(NF90_NOWRITE, NF90_MPIIO), ncid_core, &
+             comm=geom%f_comm%communicator(), info=MPI_INFO_NULL))
+  call check(nf90_inq_varid(ncid_core, trim(ua_name), varid_ua))
+  call check(nf90_inq_varid(ncid_core, trim(va_name), varid_va))
+  call check(nf90_inq_varid(ncid_core, 'u', varid_u))
+  call check(nf90_inq_varid(ncid_core, 'v', varid_v))
+  call check(nf90_get_var(ncid_core, varid_ua, ua_bkg, start=start,   count=counts))
+  call check(nf90_get_var(ncid_core, varid_va, va_bkg, start=start,   count=counts))
+  call check(nf90_get_var(ncid_core, varid_u,  ud_bkg, start=start_u, count=counts_u))
+  call check(nf90_get_var(ncid_core, varid_v,  vd_bkg, start=start_v, count=counts_v))
+  call check(nf90_close(ncid_core))
+
+  dua = ua_ana - ua_bkg
+  dva = va_ana - va_bkg
+
+  if (self%use_d_to_a_inverse_for_D_wind_restart_output) then
+    timer_start = MPI_Wtime()
+    call d_to_a_inverse(geom, dua, dva, dud, dvd)
+    timer_end = MPI_Wtime()
+    if (rank == 0) then
+      write(*,'(A,F10.3,A)') 'fv3jedi_io_fms_mod.write_restart_all_reg: d_to_a_inverse time = ', &
+                             timer_end - timer_start, ' s'
+    endif
+  else
+    call a_to_d(geom, dua, dva, dud, dvd)
+  endif
+
+  ud_out = ud_bkg + dud
+  vd_out = vd_bkg + dvd
+endif
+
 if (write_comm /= MPI_COMM_NULL) then
+
   n = mype_fileid
   call MPI_Comm_rank(write_comm, write_rank, ierr)
 
@@ -2219,117 +2303,6 @@ if (write_comm /= MPI_COMM_NULL) then
           call check( nf90_inq_varid(ncid(n),trim(varnames(file_var_idx)),varid) )
           call check( nf90_put_att(ncid(n), varid, "checksum", trim(chksum)) )
         enddo ! var loop
-
-! SKD NEWEDIT BELOW
-write(6,'("DEBUG file branch: rank=",I6," write_rank=",I6," n=",I6," index_core=",I6," write_into_existing=",L1," l_D=",L1)') &
-        rank, write_rank, n, self%index_core, self%write_into_existing_files, self%l_D_wind_restart_output
-call flush(6)
-if (self%write_into_existing_files .and. self%l_D_wind_restart_output .and. n == self%index_core) then
-  if (.not. hasfield(fields, 'eastward_wind') .or. .not. hasfield(fields, 'northward_wind')) then
-    call abor1_ftn('fv3jedi_io_fms_mod.write_restart_all_reg: l_D_wind_restart_output requires eastward_wind and northward_wind')
-  endif
-
-  if (ncid(n) < 0) then
-    call abor1_ftn('fv3jedi_io_fms_mod.write_restart_all_reg: fv_core file is not open for D-wind restart output')
-  endif
-
-  ua_name = ioname('eastward_wind', field_io_names)
-  va_name = ioname('northward_wind', field_io_names)
-
-  write(6,'("DEBUG D-wind: rank=",I6," write_rank=",I6," n=",I6," ua_name=",A," va_name=",A)') &
-          rank, write_rank, n, trim(ua_name), trim(va_name)
-  call flush(6)
-
-  call get_field(fields, 'eastward_wind', ua_ana)
-  call get_field(fields, 'northward_wind', va_ana)
-
-  if (allocated(ua_bkg)) deallocate(ua_bkg)
-  if (allocated(va_bkg)) deallocate(va_bkg)
-  if (allocated(dua))    deallocate(dua)
-  if (allocated(dva))    deallocate(dva)
-  if (allocated(ud_bkg)) deallocate(ud_bkg)
-  if (allocated(vd_bkg)) deallocate(vd_bkg)
-  if (allocated(dud))    deallocate(dud)
-  if (allocated(dvd))    deallocate(dvd)
-  if (allocated(ud_out)) deallocate(ud_out)
-  if (allocated(vd_out)) deallocate(vd_out)
-
-  allocate(ua_bkg(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
-  allocate(va_bkg(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
-  allocate(dua   (geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
-  allocate(dva   (geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
-  allocate(ud_bkg(geom%isc:geom%iec,   geom%jsc:geom%jec+1, geom%npz))
-  allocate(vd_bkg(geom%isc:geom%iec+1, geom%jsc:geom%jec,   geom%npz))
-  allocate(dud   (geom%isc:geom%iec,   geom%jsc:geom%jec+1, geom%npz))
-  allocate(dvd   (geom%isc:geom%iec+1, geom%jsc:geom%jec,   geom%npz))
-  allocate(ud_out(geom%isc:geom%iec,   geom%jsc:geom%jec+1, geom%npz))
-  allocate(vd_out(geom%isc:geom%iec+1, geom%jsc:geom%jec,   geom%npz))
-
-  start    = (/ geom%isc, geom%jsc, 1 /)
-  counts   = (/ size(ua_bkg,1), size(ua_bkg,2), size(ua_bkg,3) /)
-  start_u  = (/ geom%isc, geom%jsc, 1 /)
-  counts_u = (/ size(ud_bkg,1), size(ud_bkg,2), size(ud_bkg,3) /)
-  start_v  = (/ geom%isc, geom%jsc, 1 /)
-  counts_v = (/ size(vd_bkg,1), size(vd_bkg,2), size(vd_bkg,3) /)
-
-  write(6,'("DEBUG D-wind: start=",3I8," counts=",3I8)') start, counts
-  write(6,'("DEBUG D-wind: start_u=",3I8," counts_u=",3I8)') start_u, counts_u
-  write(6,'("DEBUG D-wind: start_v=",3I8," counts_v=",3I8)') start_v, counts_v
-  call flush(6)
-
-  call check(nf90_inq_varid(ncid(n), trim(ua_name), varid_ua))
-  call check(nf90_inq_varid(ncid(n), trim(va_name), varid_va))
-  call check(nf90_inq_varid(ncid(n), 'u', varid_u))
-  call check(nf90_inq_varid(ncid(n), 'v', varid_v))
-
-  write(6,*) 'DEBUG D-wind: before get ua'
-  call flush(6)
-  call check(nf90_get_var(ncid(n), varid_ua, ua_bkg, start=start,   count=counts))
-
-  write(6,*) 'DEBUG D-wind: before get va'
-  call flush(6)
-  call check(nf90_get_var(ncid(n), varid_va, va_bkg, start=start,   count=counts))
-
-  write(6,*) 'DEBUG D-wind: before get u'
-  call flush(6)
-  call check(nf90_get_var(ncid(n), varid_u,  ud_bkg, start=start_u, count=counts_u))
-
-  write(6,*) 'DEBUG D-wind: before get v'
-  call flush(6)
-  call check(nf90_get_var(ncid(n), varid_v,  vd_bkg, start=start_v, count=counts_v))
-
-  dua = ua_ana - ua_bkg
-  dva = va_ana - va_bkg
-
-  write(6,*) 'DEBUG D-wind: before transform'
-  call flush(6)
-  if (self%use_d_to_a_inverse_for_D_wind_restart_output) then
-    timer_start = MPI_Wtime()
-    call d_to_a_inverse(geom, dua, dva, dud, dvd)
-    timer_end = MPI_Wtime()
-    write(*,'(A,F10.3,A)') 'fv3jedi_io_fms_mod.write_restart_all_reg: d_to_a_inverse time = ', &
-                           timer_end - timer_start, ' s'
-  else
-    call a_to_d(geom, dua, dva, dud, dvd)
-  endif
-
-  ud_out = ud_bkg + dud
-  vd_out = vd_bkg + dvd
-
-  write(6,*) 'DEBUG D-wind: before put u'
-  call flush(6)
-  call check(nf90_put_var(ncid(n), varid_u, ud_out, start=start_u, count=counts_u))
-
-  write(6,*) 'DEBUG D-wind: before put v'
-  call flush(6)
-  call check(nf90_put_var(ncid(n), varid_v, vd_out, start=start_v, count=counts_v))
-
-  call check(nf90_sync(ncid(n)))
-
-  write(6,*) 'DEBUG D-wind: done'
-  call flush(6)
-endif
-! SKD NEWEDIT ABOVE
 
       else
         write(6,'("ERROR: File ",2A)') trim(FileNamesToProcess(n)),' could not be opened'
@@ -2502,6 +2475,16 @@ if (write_comm /= MPI_COMM_NULL) then
       endif
     endif
   enddo ! End of synchronized variable loop
+
+  if (update_d_wind_restart .and. mype_fileid == core_fileid) then
+    call check( nf90_inq_varid(ncid(mype_fileid), 'u', varid_u) )
+    call check( nf90_var_par_access(ncid(mype_fileid), varid_u, nf90_independent) )
+    call check( nf90_put_var(ncid(mype_fileid), varid_u, ud_out, start=start_u, count=counts_u) )
+
+    call check( nf90_inq_varid(ncid(mype_fileid), 'v', varid_v) )
+    call check( nf90_var_par_access(ncid(mype_fileid), varid_v, nf90_independent) )
+    call check( nf90_put_var(ncid(mype_fileid), varid_v, vd_out, start=start_v, count=counts_v) )
+  endif
 
   ! close only the file this rank worked on
   call check( nf90_close(ncid(mype_fileid)) )
