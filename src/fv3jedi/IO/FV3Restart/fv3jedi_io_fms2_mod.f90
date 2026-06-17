@@ -24,7 +24,7 @@ use mpp_domains_mod,              only: east, north, center, domain2D, mpp_get_d
 use mpp_mod,                      only: mpp_pe, mpp_root_pe, mpp_npes
 
 ! fv3jedi
-use fv3jedi_field_mod,            only: fv3jedi_field, hasfield, field_clen
+use fv3jedi_field_mod,            only: fv3jedi_field, hasfield, field_clen, get_field
 use fv3jedi_io_utils_mod,         only: vdate_to_datestring, replace_text, add_iteration, ioname, &
                                         ioscale, iounscale
 use fv3jedi_kinds_mod,            only: kind_real
@@ -35,13 +35,14 @@ use mpi, only : MPI_Wtime, MPI_comm_world, MPI_Barrier, MPI_Integer, MPI_REAL, M
                 MPI_SUM, MPI_ADDRESS_KIND, MPI_COMM_TYPE_SHARED, MPI_STATUSES_IGNORE, MPI_BOTTOM, &
                 MPI_REQUEST_NULL, MPI_STATUS_SIZE, MPI_ERR_IN_STATUS, MPI_ERROR, MPI_SUCCESS, MPI_MAX_ERROR_STRING
 use netcdf
+use wind_vt_mod,                  only: a_to_d, d_to_a_inverse
 use, intrinsic :: iso_c_binding
 
 ! --------------------------------------------------------------------------------------------------
 
 implicit none
 private
-public fv3jedi_io_fms, fv3jedi_register_field
+public fv3jedi_io_fms
 
 ! If adding a new file it is added here and object and config in setup
 integer, parameter :: numfiles = 9
@@ -117,6 +118,8 @@ type fv3jedi_io_fms
  integer :: calendar_type
  logical :: ignore_checksum
  logical :: write_into_existing_files
+ logical :: l_D_wind_restart_output = .false.
+ logical :: use_d_to_a_inverse_for_D_wind_restart_output = .false.
  character(len=16) :: default_output_resolution
  integer :: lustre_stripe_size
  !character(len=72), allocatable :: analysis_names(:)
@@ -125,6 +128,7 @@ type fv3jedi_io_fms
  ! Geometry copies
  type(domain2D), pointer :: domain
  integer :: npz
+! type(fv3jedi_geom), pointer :: geom
  contains
    procedure :: create
    procedure :: delete
@@ -139,12 +143,14 @@ contains
 
 ! --------------------------------------------------------------------------------------------------
 
+!subroutine create(self, conf, domain, npz, geom)
 subroutine create(self, conf, domain, npz)
 
 class(fv3jedi_io_fms),     intent(inout) :: self
 type(fckit_configuration), intent(in)    :: conf
 type(domain2D), target,    intent(in)    :: domain
 integer,                   intent(in)    :: npz
+!type(fv3jedi_geom), target, intent(in)   :: geom
 
 integer :: n
 character(len=:), allocatable :: str
@@ -162,6 +168,25 @@ endif
 ! If so, we can use new, parallelized routines
 ! --------------------------------------------
 call conf%get_or_die("regional restart", self%regional_restart)
+
+! Option to compute and output D-grid winds from A-grid winds during restart write.
+if (conf%has("l_D_wind_restart_output")) then
+   call conf%get_or_die("l_D_wind_restart_output", self%l_D_wind_restart_output)
+else
+   self%l_D_wind_restart_output = .false.
+endif
+if (conf%has("use_d_to_a_inverse_for_D_wind_restart_output")) then
+   call conf%get_or_die("use_d_to_a_inverse_for_D_wind_restart_output", &
+                        self%use_d_to_a_inverse_for_D_wind_restart_output)
+else
+   self%use_d_to_a_inverse_for_D_wind_restart_output = .false.
+endif
+if (self%l_D_wind_restart_output .and. .not. self%is_restart) then
+   call abor1_ftn('fv3jedi_io_fms_mod.create: l_D_wind_restart_output only applies to restart output')
+endif
+if (self%use_d_to_a_inverse_for_D_wind_restart_output .and. .not. self%l_D_wind_restart_output) then
+   call abor1_ftn('fv3jedi_io_fms_mod.create: use_d_to_a_inverse_for_D_wind_restart_output requires l_D_wind_restart_output')
+endif
 
 ! Get path to files
 ! -----------------
@@ -292,6 +317,9 @@ if ( self%is_restart ) then
    if (self%write_into_existing_files .and. .not. self%regional_restart) then
       call abor1_ftn('fv3jedi_io_fms: "write into existing files" currently applies only to regional restart writes')
    endif
+   if (self%l_D_wind_restart_output .and. .not. self%write_into_existing_files) then
+      call abor1_ftn('fv3jedi_io_fms: l_D_wind_restart_output currently applies only to "write into existing files" restart writes')
+   endif
 
    ! Optional fields to write specified?
    ! -----------------------------------
@@ -357,6 +385,7 @@ end if
 ! ---------------
 self%domain => domain
 self%npz = npz
+!self%geom = geom
 
 end subroutine create
 
@@ -367,6 +396,7 @@ subroutine delete(self)
 class(fv3jedi_io_fms), intent(inout) :: self
 
 if (associated(self%domain)) nullify(self%domain)
+!if (associated(self%geom)) nullify(self%geom)
 
 end subroutine delete
 
@@ -566,7 +596,6 @@ logical :: havedelp
 integer :: indexof_ps, indexof_delp
 real(kind=kind_real), allocatable :: delp(:,:,:)
 type(fckit_configuration) :: field_io_names_local
-character(len=field_clen) :: io_name
 
 ! Register and read fields
 ! ------------------------
@@ -619,9 +648,8 @@ do var = 1,size(fields)
   end if
 
   ! Register restart field
-  io_name = ioname(trim(fields(var)%long_name), field_io_names_local)
-  call fv3jedi_register_field(fileobj(indexrst), io_name, fields(var)%array, center, .true., &
-                              trim(fields(var)%long_name), trim(fields(var)%units))
+  call fv3jedi_register_field(fileobj(indexrst), trim(fields(var)%long_name), fields(var)%array, &
+                              center, trim(fields(var)%units), .true., field_io_names_local)
 
   ! Scale field if necessary
   call ioscale(fields(var), field_io_scaling)
@@ -1305,16 +1333,14 @@ type(fckit_configuration), intent(in)    :: field_io_scaling
 
 integer                     :: var
 type(FmsNetcdfDomainFile_t) :: fileobj
-character(len=field_clen)   :: io_name
 
 ! Open file for reading
 if ( open_file(fileobj, trim(self%datapath)//'/'//trim(self%filename_nonrestart), 'read', self%domain) ) then
    ! Loop through fields
    do var = 1,size(fields)
       ! Register field
-      io_name = ioname(trim(fields(var)%long_name), field_io_names)
-      call fv3jedi_register_field(fileobj, io_name, fields(var)%array, center, .false., &
-                                  trim(fields(var)%long_name), trim(fields(var)%units))
+      call fv3jedi_register_field(fileobj, trim(fields(var)%long_name), fields(var)%array, &
+                                  center, trim(fields(var)%units), .false., field_io_names)
 
       ! Read field
       call read_data(fileobj, ioname(trim(fields(var)%long_name), field_io_names), &
@@ -1352,7 +1378,7 @@ type(FmsNetcdfDomainFile_t) :: fileobj(numfiles)
 character(len=64)  :: datefile
 character(len=8), allocatable :: dim_names(:)
 real(kind=kind_real) :: io_unscaling_factor
-character(len=field_clen) :: io_name
+
 
 ! Get datetime
 ! ------------
@@ -1409,9 +1435,9 @@ do var = 1,size(fields)
   io_unscaling_factor = iounscale(fields(var)%long_name, field_io_scaling)
 
   ! Register restart field
-  io_name = ioname(trim(fields(var)%long_name), field_io_names)
-  call fv3jedi_register_field(fileobj(indexrst), io_name, fields(var)%array, center, .true., &
-                              trim(fields(var)%long_name), trim(fields(var)%units))
+  call fv3jedi_register_field(fileobj(indexrst), trim(fields(var)%long_name), &
+                              fields(var)%array, &
+                              center, trim(fields(var)%units), .true., field_io_names)
 enddo
 
 ! Loop over files and write fields
@@ -1492,8 +1518,11 @@ character(len=12) :: stripeSize_str
 integer                      :: nn, write_rank
 
 integer :: startloc(4), countloc(4)
+integer :: start(3), counts(3)
+integer :: start_u(3), counts_u(3), start_v(3), counts_v(3)
 character(len=64)  :: datefile
 real(kind=kind_real) :: io_unscaling_factor
+real(kind=8) :: timer_start, timer_end
 integer :: dimids(4), oldMode
 integer, dimension(:), allocatable :: chunksizes
 
@@ -1501,6 +1530,12 @@ integer(kind=8), allocatable :: local_chksums(:), global_chksums(:)
 integer(kind=4) :: mold4(1)
 integer(kind=8) :: mold8(1)
 character(len=32) :: chksum
+character(len=:), allocatable :: ua_name, va_name
+real(kind=kind_real), pointer :: ua_ana(:,:,:), va_ana(:,:,:)
+real(kind=kind_real), allocatable :: ua_bkg(:,:,:), va_bkg(:,:,:), dua(:,:,:), dva(:,:,:)
+real(kind=kind_real), allocatable :: ud_bkg(:,:,:), vd_bkg(:,:,:), dud(:,:,:), dvd(:,:,:)
+real(kind=kind_real), allocatable :: ud_out(:,:,:), vd_out(:,:,:)
+integer :: varid_ua, varid_va, varid_u, varid_v
 
 character(len=72), allocatable :: tmp_names(:)
 integer,           allocatable :: tmp_d1(:), tmp_d2(:), tmp_d3(:)
@@ -1512,10 +1547,6 @@ integer :: file_idx, var_type_tmp
 
 logical :: write_field, file_exists(numfiles)
 character(len=72), save :: fields_str, res_str, action_str
-
-integer :: cached_nfields = -1
-logical :: fields_changed
-integer :: f, nz
 
 rank=mpp_pe()
 npes=mpp_npes()
@@ -1550,6 +1581,7 @@ endif
 ! ---------------------
 if (self%has_prefix) then
   do n = 1, numfiles
+    self%filenames(n) = trim(self%prefix)//"."//trim(datefile)//trim(self%filenames_conf(n))
     if (self%prepend_date) then
       self%filenames(n) = trim(self%prefix)//"."//trim(datefile)//trim(self%filenames_conf(n))
     else
@@ -1558,72 +1590,7 @@ if (self%has_prefix) then
   enddo
 endif
 
-! Check for field changes (order or size)
-! ---------------------------------------
-fields_changed = .false.
-! If cache not initialized, force rebuild
-if (cached_nfields < 0) then
-  fields_changed = .true.
-  if(rank==0) write(6,'("write_restart_all_reg: Init fields_changed")')
-elseif (cached_nfields /= size(fields)) then
-  fields_changed = .true.
-  if(rank==0) write(6,'("write_restart_all_reg: cached_nfields /= size(fields)",2I4)') cached_nfields,size(fields)
-elseif (.not. allocated(cached_field_names) .or. .not. allocated(cached_field_nz)) then
-  fields_changed = .true.
-  if(rank==0) write(6,'("write_restart_all_reg: cached_field_names or cached_field_nz not allocated cached_field_nz")')
-elseif (size(cached_field_names) /= size(fields) .or. size(cached_field_nz) /= size(fields)) then
-  fields_changed = .true.
-  if(rank==0) write(6,'("write_restart_all_reg: size of cached_field_names or cached_field_nz not right")')
-else
-  do f = 1, size(fields)
-    if (allocated(fields(f)%array)) then
-      nz = size(fields(f)%array, 3)
-    else
-      nz = -1
-    endif
-    if (trim(fields(f)%long_name) /= trim(cached_field_names(f))) then
-      fields_changed = .true.
-      if(rank==0) write(6,'("write_restart_all_reg: field name order is different",I4,5A)') f,' (', trim(fields(f)%model_name),') /= (', trim(cached_field_names(f)),')'
-      exit
-    endif
-    if (nz /= cached_field_nz(f)) then
-      fields_changed = .true.
-      if(rank==0) write(6,'("write_restart_all_reg: nz is different")')
-      exit
-    endif
-  enddo
-endif
-
-! If the Geometry changes, reallocate Scatter structure and rescan input files
-! Do this only for the first ensemble member to save significant time
-! ----------------------------------------------------------------------------
-if( (fields_changed) .or. &
-    (geom%globalsizes(1) .ne. cached_globalsizes(1)) .or. &
-    (geom%globalsizes(2) .ne. cached_globalsizes(2)) ) then
-
-  !tb1 = MPI_Wtime()
-
-  ! Update cached fields
-  cached_nfields = size(fields)
-  if (allocated(cached_field_names)) deallocate(cached_field_names)
-  if (allocated(cached_field_nz))    deallocate(cached_field_nz)
-  allocate(cached_field_names(cached_nfields))
-  allocate(cached_field_nz(cached_nfields))
-  do f = 1, cached_nfields
-    cached_field_names(f) = fields(f)%long_name
-    if (allocated(fields(f)%array)) then
-      cached_field_nz(f) = size(fields(f)%array, 3)
-    else
-      cached_field_nz(f) = -1
-    endif
-  enddo
-
-  cached_globalsizes = geom%globalsizes
-
-  if(.not. write_first_pass) then
-    call TwoPhaseGather_delete()
-  endif
-
+if (write_first_pass) then
   rstflag(:) = .false.
   file_exists(:) = .false.
   ncid(:)=-999
@@ -1681,9 +1648,7 @@ if( (fields_changed) .or. &
   if(allocated(FileNamesToProcess)) deallocate(FileNamesToProcess)
   allocate(FileNamesToProcess(totalnumfiles))
 
-  if(allocated(numvarfile)) deallocate(numvarfile)
   allocate(numvarfile(totalnumfiles))
-
   allocate(varlist(totalnumfiles))
   !te = MPI_Wtime()
   !times(1) = te-tb
@@ -2030,14 +1995,6 @@ if( (fields_changed) .or. &
   ! Allocate memory to hold the reconstructed array
   ! Assume the user wants to save variables in the application bit size (kind_real)
   if (MPI_COMM_NULL /= write_comm) then
-    if(allocated(write_buffers)) then
-      do jedi_var_idx= 1,size(write_buffers)
-        if(allocated(write_buffers(jedi_var_idx)%r4)) deallocate(write_buffers(jedi_var_idx)%r4)
-        if(allocated(write_buffers(jedi_var_idx)%r8)) deallocate(write_buffers(jedi_var_idx)%r8)
-      enddo
-      deallocate(write_buffers)
-    endif
-
     allocate(write_buffers(size(fields)))
     do file_var_idx = 1,sum(numvarfile)
       jedi_var_idx = VarToVarMap(file_var_idx)
@@ -2141,6 +2098,7 @@ do b_start = 1, ntotallev, batch_size
       ! Send the native application type (no downcast needed)
       call TwoPhaseGather_Phase1(geom, owner, rank, fields(jedi_var_idx)%array(:,:,LevelToLevelMap(level)), b_ind, reqs_p1(b_ind))
     endif
+
   end do
 
   call MPI_Waitall(n_in_batch, reqs_p1, MPI_STATUSES_IGNORE, ierr)
@@ -2261,6 +2219,118 @@ if (write_comm /= MPI_COMM_NULL) then
           call check( nf90_inq_varid(ncid(n),trim(varnames(file_var_idx)),varid) )
           call check( nf90_put_att(ncid(n), varid, "checksum", trim(chksum)) )
         enddo ! var loop
+
+! SKD NEWEDIT BELOW
+write(6,'("DEBUG file branch: rank=",I6," write_rank=",I6," n=",I6," index_core=",I6," write_into_existing=",L1," l_D=",L1)') &
+        rank, write_rank, n, self%index_core, self%write_into_existing_files, self%l_D_wind_restart_output
+call flush(6)
+if (self%write_into_existing_files .and. self%l_D_wind_restart_output .and. n == self%index_core) then
+  if (.not. hasfield(fields, 'eastward_wind') .or. .not. hasfield(fields, 'northward_wind')) then
+    call abor1_ftn('fv3jedi_io_fms_mod.write_restart_all_reg: l_D_wind_restart_output requires eastward_wind and northward_wind')
+  endif
+
+  if (ncid(n) < 0) then
+    call abor1_ftn('fv3jedi_io_fms_mod.write_restart_all_reg: fv_core file is not open for D-wind restart output')
+  endif
+
+  ua_name = ioname('eastward_wind', field_io_names)
+  va_name = ioname('northward_wind', field_io_names)
+
+  write(6,'("DEBUG D-wind: rank=",I6," write_rank=",I6," n=",I6," ua_name=",A," va_name=",A)') &
+          rank, write_rank, n, trim(ua_name), trim(va_name)
+  call flush(6)
+
+  call get_field(fields, 'eastward_wind', ua_ana)
+  call get_field(fields, 'northward_wind', va_ana)
+
+  if (allocated(ua_bkg)) deallocate(ua_bkg)
+  if (allocated(va_bkg)) deallocate(va_bkg)
+  if (allocated(dua))    deallocate(dua)
+  if (allocated(dva))    deallocate(dva)
+  if (allocated(ud_bkg)) deallocate(ud_bkg)
+  if (allocated(vd_bkg)) deallocate(vd_bkg)
+  if (allocated(dud))    deallocate(dud)
+  if (allocated(dvd))    deallocate(dvd)
+  if (allocated(ud_out)) deallocate(ud_out)
+  if (allocated(vd_out)) deallocate(vd_out)
+
+  allocate(ua_bkg(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  allocate(va_bkg(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  allocate(dua   (geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  allocate(dva   (geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  allocate(ud_bkg(geom%isc:geom%iec,   geom%jsc:geom%jec+1, geom%npz))
+  allocate(vd_bkg(geom%isc:geom%iec+1, geom%jsc:geom%jec,   geom%npz))
+  allocate(dud   (geom%isc:geom%iec,   geom%jsc:geom%jec+1, geom%npz))
+  allocate(dvd   (geom%isc:geom%iec+1, geom%jsc:geom%jec,   geom%npz))
+  allocate(ud_out(geom%isc:geom%iec,   geom%jsc:geom%jec+1, geom%npz))
+  allocate(vd_out(geom%isc:geom%iec+1, geom%jsc:geom%jec,   geom%npz))
+
+  start    = (/ geom%isc, geom%jsc, 1 /)
+  counts   = (/ size(ua_bkg,1), size(ua_bkg,2), size(ua_bkg,3) /)
+  start_u  = (/ geom%isc, geom%jsc, 1 /)
+  counts_u = (/ size(ud_bkg,1), size(ud_bkg,2), size(ud_bkg,3) /)
+  start_v  = (/ geom%isc, geom%jsc, 1 /)
+  counts_v = (/ size(vd_bkg,1), size(vd_bkg,2), size(vd_bkg,3) /)
+
+  write(6,'("DEBUG D-wind: start=",3I8," counts=",3I8)') start, counts
+  write(6,'("DEBUG D-wind: start_u=",3I8," counts_u=",3I8)') start_u, counts_u
+  write(6,'("DEBUG D-wind: start_v=",3I8," counts_v=",3I8)') start_v, counts_v
+  call flush(6)
+
+  call check(nf90_inq_varid(ncid(n), trim(ua_name), varid_ua))
+  call check(nf90_inq_varid(ncid(n), trim(va_name), varid_va))
+  call check(nf90_inq_varid(ncid(n), 'u', varid_u))
+  call check(nf90_inq_varid(ncid(n), 'v', varid_v))
+
+  write(6,*) 'DEBUG D-wind: before get ua'
+  call flush(6)
+  call check(nf90_get_var(ncid(n), varid_ua, ua_bkg, start=start,   count=counts))
+
+  write(6,*) 'DEBUG D-wind: before get va'
+  call flush(6)
+  call check(nf90_get_var(ncid(n), varid_va, va_bkg, start=start,   count=counts))
+
+  write(6,*) 'DEBUG D-wind: before get u'
+  call flush(6)
+  call check(nf90_get_var(ncid(n), varid_u,  ud_bkg, start=start_u, count=counts_u))
+
+  write(6,*) 'DEBUG D-wind: before get v'
+  call flush(6)
+  call check(nf90_get_var(ncid(n), varid_v,  vd_bkg, start=start_v, count=counts_v))
+
+  dua = ua_ana - ua_bkg
+  dva = va_ana - va_bkg
+
+  write(6,*) 'DEBUG D-wind: before transform'
+  call flush(6)
+  if (self%use_d_to_a_inverse_for_D_wind_restart_output) then
+    timer_start = MPI_Wtime()
+    call d_to_a_inverse(geom, dua, dva, dud, dvd)
+    timer_end = MPI_Wtime()
+    write(*,'(A,F10.3,A)') 'fv3jedi_io_fms_mod.write_restart_all_reg: d_to_a_inverse time = ', &
+                           timer_end - timer_start, ' s'
+  else
+    call a_to_d(geom, dua, dva, dud, dvd)
+  endif
+
+  ud_out = ud_bkg + dud
+  vd_out = vd_bkg + dvd
+
+  write(6,*) 'DEBUG D-wind: before put u'
+  call flush(6)
+  call check(nf90_put_var(ncid(n), varid_u, ud_out, start=start_u, count=counts_u))
+
+  write(6,*) 'DEBUG D-wind: before put v'
+  call flush(6)
+  call check(nf90_put_var(ncid(n), varid_v, vd_out, start=start_v, count=counts_v))
+
+  call check(nf90_sync(ncid(n)))
+
+  write(6,*) 'DEBUG D-wind: done'
+  call flush(6)
+endif
+! SKD NEWEDIT ABOVE
+
       else
         write(6,'("ERROR: File ",2A)') trim(FileNamesToProcess(n)),' could not be opened'
         call flush(6)
@@ -2432,6 +2502,7 @@ if (write_comm /= MPI_COMM_NULL) then
       endif
     endif
   enddo ! End of synchronized variable loop
+
   ! close only the file this rank worked on
   call check( nf90_close(ncid(mype_fileid)) )
   call MPI_Info_free(info,ierr)
@@ -2445,6 +2516,20 @@ endif ! write_comm
 deallocate(reqs_p1, reqs_p2)
 
 !call TwoPhaseGather_delete() ! Need to figure out where/when to call this cleanup routine
+
+if (allocated(ua_bkg)) deallocate(ua_bkg)
+if (allocated(va_bkg)) deallocate(va_bkg)
+if (allocated(dua)) deallocate(dua)
+if (allocated(dva)) deallocate(dva)
+if (allocated(ud_bkg)) deallocate(ud_bkg)
+if (allocated(vd_bkg)) deallocate(vd_bkg)
+if (allocated(dud)) deallocate(dud)
+if (allocated(dvd)) deallocate(dvd)
+if (allocated(ud_out)) deallocate(ud_out)
+if (allocated(vd_out)) deallocate(vd_out)
+if (allocated(ua_name)) deallocate(ua_name)
+if (allocated(va_name)) deallocate(va_name)
+nullify(ua_ana, va_ana)
 
 !Write date/time info in coupler.res
 !-----------------------------------
@@ -2473,7 +2558,6 @@ integer                     :: var, n
 type(FmsNetcdfDomainFile_t) :: fileobj
 logical                     :: write_field
 real(kind=kind_real)        :: io_unscaling_factor
-character(len=field_clen)   :: io_name
 
 ! Open file for overwriting
 if ( open_file(fileobj, trim(self%datapath)//'/'//trim(self%filename_nonrestart), 'overwrite', self%domain) ) then
@@ -2493,9 +2577,8 @@ if ( open_file(fileobj, trim(self%datapath)//'/'//trim(self%filename_nonrestart)
 
       if ( write_field ) then
          ! Register field
-         io_name = ioname(trim(fields(var)%long_name), field_io_names)
-         call fv3jedi_register_field(fileobj, io_name, fields(var)%array, center, .false., &
-                                     trim(fields(var)%long_name), trim(fields(var)%units))
+         call fv3jedi_register_field(fileobj, trim(fields(var)%long_name), fields(var)%array, &
+                                     center, trim(fields(var)%units), .false., field_io_names)
 
          ! Write field
          io_unscaling_factor = iounscale(fields(var)%long_name, field_io_scaling)
@@ -2516,15 +2599,16 @@ end subroutine write_nonrestart_all
 
 ! --------------------------------------------------------------------------------------------------
 
-subroutine fv3jedi_register_field(fileobj, io_name_in, array, position, is_restart, long_name, units)
+subroutine fv3jedi_register_field(fileobj, long_name, array, position, units, is_restart, &
+                                  field_io_names)
 
   type(FmsNetcdfDomainFile_t), intent(inout) :: fileobj
-  character(len=*), intent(in)               :: io_name_in
+  character(len=*), intent(in)               :: long_name
   real(kind=kind_real), intent(in)           :: array(:,:,:)
   integer, intent(in)                        :: position
-  logical, intent(in)                        :: is_restart
-  character(len=*), optional, intent(in)     :: long_name
   character(len=*), optional, intent(in)     :: units
+  logical, intent(in)                        :: is_restart
+  type(fckit_configuration), intent(in)      :: field_io_names
 
   logical :: is_open, is_registered
   integer :: ndims, idim, num_zaxes, nz_dim, nz_field, array_shape(3)
@@ -2532,7 +2616,9 @@ subroutine fv3jedi_register_field(fileobj, io_name_in, array, position, is_resta
   character(len=8), dimension(:), allocatable :: dim_names
   character(len=field_clen) :: io_name
 
-  io_name = trim(io_name_in)
+  ! Get the potential io_name from the field_io_names
+  ! ------------------------------------------------
+  io_name = ioname(long_name, field_io_names)
 
   if ( fileobj%is_readonly ) then ! For read
      ! Get variable dimensions
@@ -2686,9 +2772,7 @@ subroutine fv3jedi_register_field(fileobj, io_name_in, array, position, is_resta
      end if
 
      ! Set field attributes
-     if ( present(long_name) ) then
-        call register_variable_attribute(fileobj, trim(io_name), 'long_name', trim(long_name), str_len=len(trim(long_name)))
-     endif
+     call register_variable_attribute(fileobj, trim(io_name), 'long_name', trim(long_name), str_len=len(trim(long_name)))
      if ( present(units) ) then
         call register_variable_attribute(fileobj, trim(io_name), 'units', trim(units), str_len=len(trim(units)))
      end if
@@ -2890,7 +2974,7 @@ end subroutine dummy_final
       endif
     enddo
 
-    !if(mpp_pe()==0) then
+    !if(rank==0) then
     !  write(6,'(2a5,2x,a45,2a10)') "core","fid","varname","lvlbegin","lvlend"
     !  do k=1,npes
     !     write(6,'(2I5,2x,a45,2I10)') k,out_fileid(k),trim(out_varname(k)),out_lvlbegin(k),out_lvlend(k)
