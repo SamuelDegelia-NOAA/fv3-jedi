@@ -98,6 +98,17 @@ type :: fv3jedi_geom
   type(fckit_configuration) :: field_masks
   type(fckit_configuration) :: field_interp_methods
 
+  ! For use with regional restart reads
+  integer :: EWindex, NSindex                                                       !column and row index into the global MPI grid
+  integer, allocatable :: ibegin(:), iend(:), jbegin(:), jend(:)                    !store all subdomain coordinates
+  integer, allocatable :: NumColsPerRank(:), NumRowsPerRank(:)
+  integer, allocatable :: MyRowGlobal(:), MyColGlobal(:)
+  integer, allocatable :: MyRankInRowComm(:), MyRankInColComm(:)
+  integer :: colComm, rowComm, rowrank, colrank                                     !MPI Communicators and indexes used in the two-phase scatter
+  integer :: globalsizes(2), localsizes(2)
+  logical :: rowComm_created = .false.
+  logical :: colComm_created = .false.
+
   contains
     procedure, public :: create
     procedure, public :: clone
@@ -175,7 +186,7 @@ integer,                     intent(out)   :: npz
 character(len=256)                    :: file_akbk
 type(fv_atmos_type), allocatable      :: Atm(:)
 logical, allocatable                  :: grids_on_this_pe(:)
-integer                               :: i, j, jj, this_grid
+integer                               :: i, j, jj, this_grid, ierr
 integer                               :: p_split = 1
 integer                               :: ncstat, ncid, akvarid, bkvarid, readdim, dcount
 integer, dimension(nf90_max_var_dims) :: dimids, dimlens
@@ -185,11 +196,20 @@ real(kind=kind_real) :: sf, t_lon, t_lat
 logical :: do_write_geom = .false.
 integer :: iterator_dimension = 2
 
+integer :: rowSize, colSize
+integer :: myRowRank, myColRank
+integer :: mpicomm, wrank, wsize
+
 type(fv3jedi_fmsnamelist) :: fmsnamelist
 
 ! Add the communicator to the geometry
 ! ------------------------------------
 self%f_comm = comm
+
+! Initialize comms
+! ----------------
+self%rowComm = MPI_COMM_NULL
+self%colComm = MPI_COMM_NULL
 
 ! Initialize field_masks config
 ! -----------------------------
@@ -300,6 +320,67 @@ allocate(self%rsin_v(self%isd:self%ied  ,self%jsd:self%jed+1))
 allocate(self%rsin2 (self%isd:self%ied  ,self%jsd:self%jed  ))
 allocate(self%dxa   (self%isd:self%ied  ,self%jsd:self%jed  ))
 allocate(self%dya   (self%isd:self%ied  ,self%jsd:self%jed  ))
+
+! For reading regional restart files with paralell I/O
+! Build helper communicators describing the 2D PE layout and each rank's subdomain
+! ----------------------------------------
+mpicomm = self%f_comm%communicator()
+call MPI_Comm_rank(mpicomm, wrank, ierr)
+call MPI_Comm_size(mpicomm, wsize, ierr)
+
+self%EWindex = modulo(wrank,self%layout(1))
+self%NSindex = (wrank/self%layout(1))
+
+call MPI_Comm_split(mpicomm, self%NSindex, wrank, self%rowComm, ierr)
+if (ierr /= MPI_SUCCESS) call mpp_error(FATAL, "MPI_Comm_split rowComm failed")
+self%rowComm_created = .true.
+
+call MPI_Comm_split(mpicomm, self%EWindex, wrank, self%colComm, ierr)
+if (ierr /= MPI_SUCCESS) call mpp_error(FATAL, "MPI_Comm_split colComm failed")
+self%colComm_created = .true.
+
+call MPI_Comm_size(self%rowComm, rowSize, ierr)
+call MPI_Comm_size(self%colComm, colSize, ierr)
+
+! Allocate based on actual comm sizes
+allocate(self%ibegin(0:rowSize-1), self%iend(0:rowSize-1))
+allocate(self%jbegin(0:colSize-1), self%jend(0:colSize-1))
+
+call MPI_AllGather(self%isc,1,MPI_Integer,self%ibegin(0:),1,MPI_Integer, self%rowComm, ierr)
+call MPI_AllGather(self%iec,1,MPI_Integer,self%iend(0:)  ,1,MPI_Integer, self%rowComm, ierr)
+call MPI_AllGather(self%jsc,1,MPI_Integer,self%jbegin(0:),1,MPI_Integer, self%colComm, ierr)
+call MPI_AllGather(self%jec,1,MPI_Integer,self%jend(0:)  ,1,MPI_Integer, self%colComm, ierr)
+
+! Let other ranks know my row and column index
+allocate(self%MyRowGlobal(0:wsize-1), self%MyColGlobal(0:wsize-1))
+self%MyRowGlobal=-999; self%MyColGlobal=-999
+call MPI_AllGather(self%NSindex,1,MPI_Integer,self%MyRowGlobal,1,MPI_Integer, mpicomm, ierr)
+call MPI_AllGather(self%EWindex,1,MPI_Integer,self%MyColGlobal,1,MPI_Integer, mpicomm, ierr)
+
+! Let other ranks know my rank in the row and column communicators
+call MPI_Comm_rank(self%rowComm, self%rowrank, ierr)
+call MPI_Comm_rank(self%colComm, self%colrank, ierr)
+allocate(self%MyRankInRowComm(0:wsize-1), self%MyRankInColComm(0:wsize-1))
+self%MyRankInRowComm=-999; self%MyRankInColComm=-999
+call MPI_AllGather(self%rowrank,1,MPI_Integer,self%MyRankInRowComm,1,MPI_Integer, mpicomm, ierr)
+call MPI_AllGather(self%colrank,1,MPI_Integer,self%MyRankInColComm,1,MPI_Integer, mpicomm, ierr)
+
+! dimensions of my subdomain
+call MPI_Comm_rank(self%rowComm, myRowRank, ierr)  ! 0..rowSize-1
+call MPI_Comm_rank(self%colComm, myColRank, ierr)  ! 0..colSize-1
+self%localsizes(1) = self%iend(myRowRank) - self%ibegin(myRowRank) + 1
+self%localsizes(2) = self%jend(myColRank) - self%jbegin(myColRank) + 1
+
+! Let other ranks in my row and column know how many rows and columns I have in my subdomain
+allocate(self%NumColsPerRank(0:rowSize-1))
+allocate(self%NumRowsPerRank(0:colSize-1))
+self%NumColsPerRank=-999; self%NumRowsPerRank=-999
+call MPI_Allgather(self%localsizes(1), 1, MPI_Integer, self%NumColsPerRank, 1, MPI_Integer, self%rowComm, ierr)
+call MPI_Allgather(self%localsizes(2), 1, MPI_Integer, self%NumRowsPerRank, 1, MPI_Integer, self%colComm, ierr)
+
+! Horizontal dimensions of ensemble input files
+self%globalsizes(1) = self%npx-1
+self%globalsizes(2) = self%npy-1
 
 ! ak and bk hybrid coordinate coefficients
 ! ----------------------------------------
@@ -451,6 +532,8 @@ class(fv3jedi_geom),        intent(inout) :: self
 type(fv3jedi_geom), target, intent(in)    :: other
 type(fields_metadata),      intent(in)    :: fmd
 
+integer :: ierr
+
 allocate(self%ak(other%npz+1) )
 allocate(self%bk(other%npz+1) )
 
@@ -578,6 +661,34 @@ self%field_masks = other%field_masks
 
 self%field_interp_methods = other%field_interp_methods
 
+self%EWindex = other%EWindex
+self%NSindex = other%NSindex
+call MPI_Comm_dup(other%colComm, self%colComm, ierr)
+call MPI_Comm_dup(other%rowComm, self%rowComm, ierr)
+self%rowrank = other%rowrank
+self%colrank = other%colrank
+self%globalsizes = other%globalsizes
+self%localsizes = other%localsizes
+
+allocate(self%ibegin(0:self%layout(1)-1), self%iend(0:self%layout(1)-1))
+allocate(self%jbegin(0:self%layout(2)-1), self%jend(0:self%layout(2)-1))
+self%ibegin = other%ibegin
+self%iend   = other%iend
+self%jbegin = other%jbegin
+self%jend   = other%jend
+
+allocate(self%MyRowGlobal(0:mpp_npes()-1), self%MyColGlobal(0:mpp_npes()-1))
+self%MyRowGlobal = other%MyRowGlobal
+self%MyColGlobal = other%MyColGlobal
+
+allocate(self%MyRankInRowComm(0:mpp_npes()-1), self%MyRankInColComm(0:mpp_npes()-1))
+self%MyRankInRowComm = other%MyRankInRowComm
+self%MyRankInColComm = other%MyRankInColComm
+
+allocate(self%NumColsPerRank(0:self%layout(2)-1), self%NumRowsPerRank(0:self%layout(1)-1))
+self%NumColsPerRank = other%NumColsPerRank
+self%NumRowsPerRank = other%NumRowsPerRank
+
 end subroutine clone
 
 ! --------------------------------------------------------------------------------------------------
@@ -585,6 +696,8 @@ end subroutine clone
 subroutine delete(self)
 
 class(fv3jedi_geom), intent(inout) :: self
+logical :: inited, finalized
+integer :: ierr,r
 
 ! Deallocate
 deallocate(self%ak)
@@ -631,6 +744,33 @@ deallocate(self%lon_us)
 
 call self%afunctionspace%final()
 call self%geometry_fields%final()
+
+call MPI_Initialized(inited, ierr)
+call MPI_Finalized(finalized, ierr)
+
+if (inited .and. .not. finalized) then
+  if (self%rowComm_created .and. self%rowComm /= MPI_COMM_NULL) then
+    call MPI_Comm_free(self%rowComm, ierr)
+    self%rowComm = MPI_COMM_NULL
+    self%rowComm_created = .false.
+  endif
+  if (self%colComm_created .and. self%colComm /= MPI_COMM_NULL) then
+    call MPI_Comm_free(self%colComm, ierr)
+    self%colComm = MPI_COMM_NULL
+    self%colComm_created = .false.
+  endif
+endif
+
+deallocate(self%ibegin)
+deallocate(self%iend)
+deallocate(self%jbegin)
+deallocate(self%jend)
+deallocate(self%MyRankInRowComm)
+deallocate(self%MyRankInColComm)
+deallocate(self%NumColsPerRank)
+deallocate(self%NumRowsPerRank)
+deallocate(self%MyRowGlobal)
+deallocate(self%MyColGlobal)
 
 end subroutine delete
 
