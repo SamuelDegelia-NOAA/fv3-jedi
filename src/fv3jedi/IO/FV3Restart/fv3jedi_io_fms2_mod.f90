@@ -2597,7 +2597,7 @@ if (update_d_wind_restart) then
     write(*,'(A,F10.3,A)') 'fv3jedi_io_fms_mod.write_restart_all_reg: D-wind write u/v time = ', &
                            timer_end - timer_start, ' s'
     write(*,'(A,F10.3,A)') 'fv3jedi_io_fms_mod.write_restart_all_reg: D-wind total update time = ', &
-                           timer_end - d_wind_total_start, ' s'
+                           MPI_Wtime() - d_wind_total_start, ' s'
   endif
 
   rstflag = rstflag_backup
