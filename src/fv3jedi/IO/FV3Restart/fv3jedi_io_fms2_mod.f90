@@ -2160,7 +2160,8 @@ if (update_d_wind_restart) then
   if (.not. hasfield(fields, 'eastward_wind') .or. .not. hasfield(fields, 'northward_wind')) then
     call abor1_ftn('fv3jedi_io_fms_mod.write_restart_all_reg: l_D_wind_restart_output requires eastward_wind and northward_wind')
   endif
-  core_filename = trim(self%datapath)//'/'//trim(self%filenames(self%index_core))
+!  core_filename = trim(self%datapath)//'/'//trim(self%filenames(self%index_core))
+  core_filename = trim(FileNamesToProcess(core_fileid))
   do i = 1, totalnumfiles
     if (trim(FileNamesToProcess(i)) == trim(core_filename)) core_fileid = i
   enddo
@@ -2542,8 +2543,8 @@ if (update_d_wind_restart) then
              comm=geom%f_comm%communicator(), info=MPI_INFO_NULL))
   call check(nf90_inq_varid(ncid_core, 'u', varid_u))
   call check(nf90_inq_varid(ncid_core, 'v', varid_v))
-  call check(nf90_var_par_access(ncid_core, varid_u, nf90_independent))
-  call check(nf90_var_par_access(ncid_core, varid_v, nf90_independent))
+  call check(nf90_var_par_access(ncid_core, varid_u, nf90_collective))
+  call check(nf90_var_par_access(ncid_core, varid_v, nf90_collective))
   call check(nf90_get_var(ncid_core, varid_u, u_edge, start=edge_start, count=edge_count))
 
   edge_start = (/ geom%iec+1, geom%jsc, 1 /)
@@ -2586,10 +2587,10 @@ if (update_d_wind_restart) then
   call check(nf90_open(trim(core_filename), ior(NF90_WRITE, NF90_MPIIO), ncid_core, &
              comm=geom%f_comm%communicator(), info=MPI_INFO_NULL))
   call check( nf90_inq_varid(ncid_core, 'u', varid_u) )
-  call check( nf90_var_par_access(ncid_core, varid_u, nf90_independent) )
+  call check( nf90_var_par_access(ncid_core, varid_u, nf90_collective) )
   call check( nf90_put_var(ncid_core, varid_u, ud_out, start=start_u, count=counts_u) )
   call check( nf90_inq_varid(ncid_core, 'v', varid_v) )
-  call check( nf90_var_par_access(ncid_core, varid_v, nf90_independent) )
+  call check( nf90_var_par_access(ncid_core, varid_v, nf90_collective) )
   call check( nf90_put_var(ncid_core, varid_v, vd_out, start=start_v, count=counts_v) )
   call check(nf90_close(ncid_core))
   timer_end = MPI_Wtime()
