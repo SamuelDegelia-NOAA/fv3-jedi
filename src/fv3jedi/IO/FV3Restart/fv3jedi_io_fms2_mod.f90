@@ -2432,24 +2432,24 @@ if (write_comm /= MPI_COMM_NULL) then
 endif ! write_comm
 if (update_d_wind_restart) then
   d_wind_total_start = MPI_Wtime()
-  rstflag_backup = rstflag
-  my_var_index_backup = my_var_index
-  ntotallev_backup = ntotallev
-  mype_lbegin_backup = mype_lbegin
-  mype_lend_backup = mype_lend
-  mype_vartype_backup = mype_vartype
-  mype_fileid_backup = mype_fileid
-  mype_varname_backup = mype_varname
+!  rstflag_backup = rstflag
+!  my_var_index_backup = my_var_index
+!  ntotallev_backup = ntotallev
+!  mype_lbegin_backup = mype_lbegin
+!  mype_lend_backup = mype_lend
+!  mype_vartype_backup = mype_vartype
+!  mype_fileid_backup = mype_fileid
+!  mype_varname_backup = mype_varname
 
-  if (allocated(LevelToProcMap))      allocate(LevelToProcMap_backup, source=LevelToProcMap)
-  if (allocated(LevelToVariableMap))  allocate(LevelToVariableMap_backup, source=LevelToVariableMap)
-  if (allocated(LevelToLevelMap))     allocate(LevelToLevelMap_backup, source=LevelToLevelMap)
-  if (allocated(VarToVarMap))         allocate(VarToVarMap_backup, source=VarToVarMap)
-  if (allocated(nc_vartype))          allocate(nc_vartype_backup, source=nc_vartype)
-  if (allocated(numvarfile))          allocate(numvarfile_backup, source=numvarfile)
-  if (allocated(nlevpervar))          allocate(nlevpervar_backup, source=nlevpervar)
-  if (allocated(varnames))            allocate(varnames_backup, source=varnames)
-  if (allocated(FileNamesToProcess))  allocate(FileNamesToProcess_backup, source=FileNamesToProcess)
+!  if (allocated(LevelToProcMap))      allocate(LevelToProcMap_backup, source=LevelToProcMap)
+!  if (allocated(LevelToVariableMap))  allocate(LevelToVariableMap_backup, source=LevelToVariableMap)
+!  if (allocated(LevelToLevelMap))     allocate(LevelToLevelMap_backup, source=LevelToLevelMap)
+!  if (allocated(VarToVarMap))         allocate(VarToVarMap_backup, source=VarToVarMap)
+!  if (allocated(nc_vartype))          allocate(nc_vartype_backup, source=nc_vartype)
+!  if (allocated(numvarfile))          allocate(numvarfile_backup, source=numvarfile)
+!  if (allocated(nlevpervar))          allocate(nlevpervar_backup, source=nlevpervar)
+!  if (allocated(varnames))            allocate(varnames_backup, source=varnames)
+!  if (allocated(FileNamesToProcess))  allocate(FileNamesToProcess_backup, source=FileNamesToProcess)
 
   call get_field(fields, 'eastward_wind', ua_ana)
   call get_field(fields, 'northward_wind', va_ana)
@@ -2496,6 +2496,7 @@ if (update_d_wind_restart) then
   d_wind_read_fields(2)%jec = geom%jec
   d_wind_read_fields(2)%npz = geom%npz
   allocate(d_wind_read_fields(2)%array(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  cached_globalsizes = 0  ! invalidate cache so member path is picked up fresh
   timer_start = MPI_Wtime()
   call read_restart_fields_reg(self, geom, d_wind_read_fields, field_io_names, field_io_scaling)
   timer_end = MPI_Wtime()
@@ -2525,6 +2526,7 @@ if (update_d_wind_restart) then
   d_wind_field_io_names = field_io_names
   call d_wind_field_io_names%set('eastward_wind', 'u')
   call d_wind_field_io_names%set('northward_wind', 'v')
+  cached_globalsizes = 0  ! invalidate cache so member path is picked up fresh
   timer_start = MPI_Wtime()
   call read_restart_fields_reg(self, geom, d_wind_read_fields, d_wind_field_io_names, field_io_scaling)
   timer_end = MPI_Wtime()
@@ -2601,14 +2603,14 @@ if (update_d_wind_restart) then
                            MPI_Wtime() - d_wind_total_start, ' s'
   endif
 
-  rstflag = rstflag_backup
-  my_var_index = my_var_index_backup
-  ntotallev = ntotallev_backup
-  mype_lbegin = mype_lbegin_backup
-  mype_lend = mype_lend_backup
-  mype_vartype = mype_vartype_backup
-  mype_fileid = mype_fileid_backup
-  mype_varname = mype_varname_backup
+!  rstflag = rstflag_backup
+!  my_var_index = my_var_index_backup
+!  ntotallev = ntotallev_backup
+!  mype_lbegin = mype_lbegin_backup
+!  mype_lend = mype_lend_backup
+!  mype_vartype = mype_vartype_backup
+!  mype_fileid = mype_fileid_backup
+!  mype_varname = mype_varname_backup
 
   if (allocated(LevelToProcMap)) deallocate(LevelToProcMap)
   if (allocated(LevelToVariableMap)) deallocate(LevelToVariableMap)
@@ -2620,15 +2622,15 @@ if (update_d_wind_restart) then
   if (allocated(varnames)) deallocate(varnames)
   if (allocated(FileNamesToProcess)) deallocate(FileNamesToProcess)
 
-  if (allocated(LevelToProcMap_backup)) call move_alloc(LevelToProcMap_backup, LevelToProcMap)
-  if (allocated(LevelToVariableMap_backup)) call move_alloc(LevelToVariableMap_backup, LevelToVariableMap)
-  if (allocated(LevelToLevelMap_backup)) call move_alloc(LevelToLevelMap_backup, LevelToLevelMap)
-  if (allocated(VarToVarMap_backup)) call move_alloc(VarToVarMap_backup, VarToVarMap)
-  if (allocated(nc_vartype_backup)) call move_alloc(nc_vartype_backup, nc_vartype)
-  if (allocated(numvarfile_backup)) call move_alloc(numvarfile_backup, numvarfile)
-  if (allocated(nlevpervar_backup)) call move_alloc(nlevpervar_backup, nlevpervar)
-  if (allocated(varnames_backup)) call move_alloc(varnames_backup, varnames)
-  if (allocated(FileNamesToProcess_backup)) call move_alloc(FileNamesToProcess_backup, FileNamesToProcess)
+!  if (allocated(LevelToProcMap_backup)) call move_alloc(LevelToProcMap_backup, LevelToProcMap)
+!  if (allocated(LevelToVariableMap_backup)) call move_alloc(LevelToVariableMap_backup, LevelToVariableMap)
+!  if (allocated(LevelToLevelMap_backup)) call move_alloc(LevelToLevelMap_backup, LevelToLevelMap)
+!  if (allocated(VarToVarMap_backup)) call move_alloc(VarToVarMap_backup, VarToVarMap)
+!  if (allocated(nc_vartype_backup)) call move_alloc(nc_vartype_backup, nc_vartype)
+!  if (allocated(numvarfile_backup)) call move_alloc(numvarfile_backup, numvarfile)
+!  if (allocated(nlevpervar_backup)) call move_alloc(nlevpervar_backup, nlevpervar)
+!  if (allocated(varnames_backup)) call move_alloc(varnames_backup, varnames)
+!  if (allocated(FileNamesToProcess_backup)) call move_alloc(FileNamesToProcess_backup, FileNamesToProcess)
 endif
 
 !te = MPI_Wtime()
