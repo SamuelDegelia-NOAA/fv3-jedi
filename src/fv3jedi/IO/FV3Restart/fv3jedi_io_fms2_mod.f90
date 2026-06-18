@@ -1518,9 +1518,8 @@ character(len=12) :: stripeSize_str
 integer                      :: nn, write_rank
 
 integer :: startloc(4), countloc(4)
-integer :: start(3), counts(3)
 integer :: start_u(3), counts_u(3), start_v(3), counts_v(3)
-integer :: counts_u_write(3), counts_v_write(3)
+integer :: edge_start(3), edge_count(3)
 character(len=64)  :: datefile
 real(kind=kind_real) :: io_unscaling_factor
 real(kind=8) :: timer_start, timer_end
@@ -1531,13 +1530,15 @@ integer(kind=8), allocatable :: local_chksums(:), global_chksums(:)
 integer(kind=4) :: mold4(1)
 integer(kind=8) :: mold8(1)
 character(len=32) :: chksum
-character(len=:), allocatable :: ua_name, va_name
 character(len=:), allocatable :: core_filename
 real(kind=kind_real), pointer :: ua_ana(:,:,:), va_ana(:,:,:)
 real(kind=kind_real), allocatable :: ua_bkg(:,:,:), va_bkg(:,:,:), dua(:,:,:), dva(:,:,:)
 real(kind=kind_real), allocatable :: ud_bkg(:,:,:), vd_bkg(:,:,:), dud(:,:,:), dvd(:,:,:)
 real(kind=kind_real), allocatable :: ud_out(:,:,:), vd_out(:,:,:)
-integer :: varid_ua, varid_va, varid_u, varid_v
+real(kind=kind_real), allocatable :: u_edge(:,:,:), v_edge(:,:,:)
+type(fv3jedi_field), allocatable :: d_wind_read_fields(:)
+type(fckit_configuration) :: d_wind_field_io_names
+integer :: varid_u, varid_v
 integer :: ncid_core
 integer :: core_fileid
 logical :: update_d_wind_restart
@@ -2155,80 +2156,6 @@ if (update_d_wind_restart) then
   if (core_fileid <= 0) then
     call abor1_ftn('fv3jedi_io_fms_mod.write_restart_all_reg: fv_core file is not selected for D-wind restart output')
   endif
-
-  ua_name = ioname('eastward_wind', field_io_names)
-  va_name = ioname('northward_wind', field_io_names)
-  call get_field(fields, 'eastward_wind', ua_ana)
-  call get_field(fields, 'northward_wind', va_ana)
-
-  if (allocated(ua_bkg)) deallocate(ua_bkg)
-  if (allocated(va_bkg)) deallocate(va_bkg)
-  if (allocated(dua))    deallocate(dua)
-  if (allocated(dva))    deallocate(dva)
-  if (allocated(ud_bkg)) deallocate(ud_bkg)
-  if (allocated(vd_bkg)) deallocate(vd_bkg)
-  if (allocated(dud))    deallocate(dud)
-  if (allocated(dvd))    deallocate(dvd)
-  if (allocated(ud_out)) deallocate(ud_out)
-  if (allocated(vd_out)) deallocate(vd_out)
-
-  allocate(ua_bkg(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
-  allocate(va_bkg(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
-  allocate(dua   (geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
-  allocate(dva   (geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
-  allocate(ud_bkg(geom%isc:geom%iec,   geom%jsc:geom%jec+1, geom%npz))
-  allocate(vd_bkg(geom%isc:geom%iec+1, geom%jsc:geom%jec,   geom%npz))
-  allocate(dud   (geom%isc:geom%iec,   geom%jsc:geom%jec+1, geom%npz))
-  allocate(dvd   (geom%isc:geom%iec+1, geom%jsc:geom%jec,   geom%npz))
-  allocate(ud_out(geom%isc:geom%iec,   geom%jsc:geom%jec+1, geom%npz))
-  allocate(vd_out(geom%isc:geom%iec+1, geom%jsc:geom%jec,   geom%npz))
-
-  start    = (/ geom%isc, geom%jsc, 1 /)
-  counts   = (/ size(ua_bkg,1), size(ua_bkg,2), size(ua_bkg,3) /)
-  start_u  = (/ geom%isc, geom%jsc, 1 /)
-  counts_u = (/ size(ud_bkg,1), size(ud_bkg,2), size(ud_bkg,3) /)
-  start_v  = (/ geom%isc, geom%jsc, 1 /)
-  counts_v = (/ size(vd_bkg,1), size(vd_bkg,2), size(vd_bkg,3) /)
-
-  call check(nf90_open(trim(core_filename), ior(NF90_NOWRITE, NF90_MPIIO), ncid_core, &
-             comm=geom%f_comm%communicator(), info=MPI_INFO_NULL))
-  call check(nf90_inq_varid(ncid_core, trim(ua_name), varid_ua))
-  call check(nf90_inq_varid(ncid_core, trim(va_name), varid_va))
-  call check(nf90_inq_varid(ncid_core, 'u', varid_u))
-  call check(nf90_inq_varid(ncid_core, 'v', varid_v))
-  call check(nf90_var_par_access(ncid_core, varid_ua, nf90_independent))
-  call check(nf90_var_par_access(ncid_core, varid_va, nf90_independent))
-  call check(nf90_var_par_access(ncid_core, varid_u,  nf90_independent))
-  call check(nf90_var_par_access(ncid_core, varid_v,  nf90_independent))
-  call check(nf90_get_var(ncid_core, varid_ua, ua_bkg, start=start,   count=counts))
-  call check(nf90_get_var(ncid_core, varid_va, va_bkg, start=start,   count=counts))
-  call check(nf90_get_var(ncid_core, varid_u,  ud_bkg, start=start_u, count=counts_u))
-  call check(nf90_get_var(ncid_core, varid_v,  vd_bkg, start=start_v, count=counts_v))
-  call check(nf90_close(ncid_core))
-
-  dua = ua_ana - ua_bkg
-  dva = va_ana - va_bkg
-
-  if (self%use_d_to_a_inverse_for_D_wind_restart_output) then
-    timer_start = MPI_Wtime()
-    call d_to_a_inverse(geom, dua, dva, dud, dvd)
-    timer_end = MPI_Wtime()
-    if (rank == 0) then
-      write(*,'(A,F10.3,A)') 'fv3jedi_io_fms_mod.write_restart_all_reg: d_to_a_inverse time = ', &
-                             timer_end - timer_start, ' s'
-    endif
-  else
-    call a_to_d(geom, dua, dva, dud, dvd)
-  endif
-
-  ud_out = ud_bkg + dud
-  vd_out = vd_bkg + dvd
-
-  counts_u_write = counts_u
-  counts_v_write = counts_v
-  ! Avoid duplicate writes on shared D-grid edges; keep +1 edge only on global boundaries.
-  if (geom%jec < geom%npy-1) counts_u_write(2) = counts_u_write(2) - 1
-  if (geom%iec < geom%npx-1) counts_v_write(1) = counts_v_write(1) - 1
 endif
 
 if (write_comm /= MPI_COMM_NULL) then
@@ -2492,17 +2419,133 @@ if (write_comm /= MPI_COMM_NULL) then
   call MPI_Info_free(info,ierr)
 endif ! write_comm
 if (update_d_wind_restart) then
+  call get_field(fields, 'eastward_wind', ua_ana)
+  call get_field(fields, 'northward_wind', va_ana)
+
+  if (allocated(ua_bkg)) deallocate(ua_bkg)
+  if (allocated(va_bkg)) deallocate(va_bkg)
+  if (allocated(dua))    deallocate(dua)
+  if (allocated(dva))    deallocate(dva)
+  if (allocated(ud_bkg)) deallocate(ud_bkg)
+  if (allocated(vd_bkg)) deallocate(vd_bkg)
+  if (allocated(dud))    deallocate(dud)
+  if (allocated(dvd))    deallocate(dvd)
+  if (allocated(ud_out)) deallocate(ud_out)
+  if (allocated(vd_out)) deallocate(vd_out)
+  if (allocated(u_edge)) deallocate(u_edge)
+  if (allocated(v_edge)) deallocate(v_edge)
+
+  allocate(ua_bkg(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  allocate(va_bkg(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  allocate(dua   (geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  allocate(dva   (geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  allocate(ud_bkg(geom%isc:geom%iec,   geom%jsc:geom%jec+1, geom%npz))
+  allocate(vd_bkg(geom%isc:geom%iec+1, geom%jsc:geom%jec,   geom%npz))
+  allocate(dud   (geom%isc:geom%iec,   geom%jsc:geom%jec+1, geom%npz))
+  allocate(dvd   (geom%isc:geom%iec+1, geom%jsc:geom%jec,   geom%npz))
+  allocate(ud_out(geom%isc:geom%iec,   geom%jsc:geom%jec+1, geom%npz))
+  allocate(vd_out(geom%isc:geom%iec+1, geom%jsc:geom%jec,   geom%npz))
+  allocate(u_edge(geom%isc:geom%iec, 1, geom%npz))
+  allocate(v_edge(1, geom%jsc:geom%jec, geom%npz))
+
+  if (allocated(d_wind_read_fields)) deallocate(d_wind_read_fields)
+  allocate(d_wind_read_fields(2))
+  d_wind_read_fields(1)%long_name = 'eastward_wind'
+  d_wind_read_fields(1)%isc = geom%isc
+  d_wind_read_fields(1)%iec = geom%iec
+  d_wind_read_fields(1)%jsc = geom%jsc
+  d_wind_read_fields(1)%jec = geom%jec
+  d_wind_read_fields(1)%npz = geom%npz
+  allocate(d_wind_read_fields(1)%array(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  d_wind_read_fields(2)%long_name = 'northward_wind'
+  d_wind_read_fields(2)%isc = geom%isc
+  d_wind_read_fields(2)%iec = geom%iec
+  d_wind_read_fields(2)%jsc = geom%jsc
+  d_wind_read_fields(2)%jec = geom%jec
+  d_wind_read_fields(2)%npz = geom%npz
+  allocate(d_wind_read_fields(2)%array(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  call read_restart_fields_reg(self, geom, d_wind_read_fields, field_io_names, field_io_scaling)
+  ua_bkg = d_wind_read_fields(1)%array
+  va_bkg = d_wind_read_fields(2)%array
+
+  deallocate(d_wind_read_fields)
+  allocate(d_wind_read_fields(1))
+  d_wind_read_fields(1)%long_name = 'eastward_wind'
+  d_wind_read_fields(1)%isc = geom%isc
+  d_wind_read_fields(1)%iec = geom%iec
+  d_wind_read_fields(1)%jsc = geom%jsc
+  d_wind_read_fields(1)%jec = geom%jec
+  d_wind_read_fields(1)%npz = geom%npz
+  allocate(d_wind_read_fields(1)%array(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  d_wind_field_io_names = field_io_names
+  call d_wind_field_io_names%set('eastward_wind', 'u')
+  call read_restart_fields_reg(self, geom, d_wind_read_fields, d_wind_field_io_names, field_io_scaling)
+  ud_bkg(:, geom%jsc:geom%jec, :) = d_wind_read_fields(1)%array
+
+  deallocate(d_wind_read_fields)
+  allocate(d_wind_read_fields(1))
+  d_wind_read_fields(1)%long_name = 'northward_wind'
+  d_wind_read_fields(1)%isc = geom%isc
+  d_wind_read_fields(1)%iec = geom%iec
+  d_wind_read_fields(1)%jsc = geom%jsc
+  d_wind_read_fields(1)%jec = geom%jec
+  d_wind_read_fields(1)%npz = geom%npz
+  allocate(d_wind_read_fields(1)%array(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  d_wind_field_io_names = field_io_names
+  call d_wind_field_io_names%set('northward_wind', 'v')
+  call read_restart_fields_reg(self, geom, d_wind_read_fields, d_wind_field_io_names, field_io_scaling)
+  vd_bkg(geom%isc:geom%iec, :, :) = d_wind_read_fields(1)%array
+
+  edge_start = (/ geom%isc, geom%jec+1, 1 /)
+  edge_count = (/ size(u_edge,1), 1, size(u_edge,3) /)
+
+  call check(nf90_open(trim(core_filename), ior(NF90_NOWRITE, NF90_MPIIO), ncid_core, &
+             comm=geom%f_comm%communicator(), info=MPI_INFO_NULL))
+  call check(nf90_inq_varid(ncid_core, 'u', varid_u))
+  call check(nf90_inq_varid(ncid_core, 'v', varid_v))
+  call check(nf90_var_par_access(ncid_core, varid_u, nf90_independent))
+  call check(nf90_var_par_access(ncid_core, varid_v, nf90_independent))
+  call check(nf90_get_var(ncid_core, varid_u, u_edge, start=edge_start, count=edge_count))
+
+  edge_start = (/ geom%iec+1, geom%jsc, 1 /)
+  edge_count = (/ 1, size(v_edge,2), size(v_edge,3) /)
+  call check(nf90_get_var(ncid_core, varid_v, v_edge, start=edge_start, count=edge_count))
+  call check(nf90_close(ncid_core))
+
+  ud_bkg(:, geom%jec+1, :) = u_edge(:, 1, :)
+  vd_bkg(geom%iec+1, :, :) = v_edge(1, :, :)
+
+  dua = ua_ana - ua_bkg
+  dva = va_ana - va_bkg
+
+  if (self%use_d_to_a_inverse_for_D_wind_restart_output) then
+    timer_start = MPI_Wtime()
+    call d_to_a_inverse(geom, dua, dva, dud, dvd)
+    timer_end = MPI_Wtime()
+    if (rank == 0) then
+      write(*,'(A,F10.3,A)') 'fv3jedi_io_fms_mod.write_restart_all_reg: d_to_a_inverse time = ', &
+                             timer_end - timer_start, ' s'
+    endif
+  else
+    call a_to_d(geom, dua, dva, dud, dvd)
+  endif
+
+  ud_out = ud_bkg + dud
+  vd_out = vd_bkg + dvd
+
+  start_u  = (/ geom%isc, geom%jsc, 1 /)
+  counts_u = (/ size(ud_bkg,1), size(ud_bkg,2), size(ud_bkg,3) /)
+  start_v  = (/ geom%isc, geom%jsc, 1 /)
+  counts_v = (/ size(vd_bkg,1), size(vd_bkg,2), size(vd_bkg,3) /)
+
   call check(nf90_open(trim(core_filename), ior(NF90_WRITE, NF90_MPIIO), ncid_core, &
              comm=geom%f_comm%communicator(), info=MPI_INFO_NULL))
-
   call check( nf90_inq_varid(ncid_core, 'u', varid_u) )
   call check( nf90_var_par_access(ncid_core, varid_u, nf90_independent) )
-  call check( nf90_put_var(ncid_core, varid_u, ud_out, start=start_u, count=counts_u_write) )
-
+  call check( nf90_put_var(ncid_core, varid_u, ud_out, start=start_u, count=counts_u) )
   call check( nf90_inq_varid(ncid_core, 'v', varid_v) )
   call check( nf90_var_par_access(ncid_core, varid_v, nf90_independent) )
-  call check( nf90_put_var(ncid_core, varid_v, vd_out, start=start_v, count=counts_v_write) )
-
+  call check( nf90_put_var(ncid_core, varid_v, vd_out, start=start_v, count=counts_v) )
   call check(nf90_close(ncid_core))
 endif
 
@@ -2526,8 +2569,9 @@ if (allocated(dud)) deallocate(dud)
 if (allocated(dvd)) deallocate(dvd)
 if (allocated(ud_out)) deallocate(ud_out)
 if (allocated(vd_out)) deallocate(vd_out)
-if (allocated(ua_name)) deallocate(ua_name)
-if (allocated(va_name)) deallocate(va_name)
+if (allocated(u_edge)) deallocate(u_edge)
+if (allocated(v_edge)) deallocate(v_edge)
+if (allocated(d_wind_read_fields)) deallocate(d_wind_read_fields)
 nullify(ua_ana, va_ana)
 
 !Write date/time info in coupler.res
