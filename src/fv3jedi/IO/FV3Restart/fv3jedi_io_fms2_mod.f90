@@ -2476,20 +2476,25 @@ if (write_comm /= MPI_COMM_NULL) then
     endif
   enddo ! End of synchronized variable loop
 
-  if (update_d_wind_restart .and. mype_fileid == core_fileid) then
-    call check( nf90_inq_varid(ncid(mype_fileid), 'u', varid_u) )
-    call check( nf90_var_par_access(ncid(mype_fileid), varid_u, nf90_independent) )
-    call check( nf90_put_var(ncid(mype_fileid), varid_u, ud_out, start=start_u, count=counts_u) )
-
-    call check( nf90_inq_varid(ncid(mype_fileid), 'v', varid_v) )
-    call check( nf90_var_par_access(ncid(mype_fileid), varid_v, nf90_independent) )
-    call check( nf90_put_var(ncid(mype_fileid), varid_v, vd_out, start=start_v, count=counts_v) )
-  endif
-
   ! close only the file this rank worked on
   call check( nf90_close(ncid(mype_fileid)) )
   call MPI_Info_free(info,ierr)
 endif ! write_comm
+if (update_d_wind_restart) then
+  call check(nf90_open(trim(core_filename), ior(NF90_WRITE, NF90_MPIIO), ncid_core, &
+             comm=geom%f_comm%communicator(), info=MPI_INFO_NULL))
+
+  call check( nf90_inq_varid(ncid_core, 'u', varid_u) )
+  call check( nf90_var_par_access(ncid_core, varid_u, nf90_independent) )
+  call check( nf90_put_var(ncid_core, varid_u, ud_out, start=start_u, count=counts_u) )
+
+  call check( nf90_inq_varid(ncid_core, 'v', varid_v) )
+  call check( nf90_var_par_access(ncid_core, varid_v, nf90_independent) )
+  call check( nf90_put_var(ncid_core, varid_v, vd_out, start=start_v, count=counts_v) )
+
+  call check(nf90_close(ncid_core))
+endif
+
 !te = MPI_Wtime()
 !times(9) = te-tb
 !call MPI_Reduce(times, walltime, size(walltime), MPI_DOUBLE_PRECISION, MPI_MAX, 0, geom%f_comm%communicator(), ierr)
