@@ -919,6 +919,8 @@ if( (fields_changed) .or. &
   !batch_size_gather=total_nodes
   !batch_size_scatter=2*batch_size_gather
 
+  if (allocated(reqs_p1)) deallocate(reqs_p1)
+  if (allocated(reqs_p2)) deallocate(reqs_p2)
   allocate(reqs_p1(batch_size), reqs_p2(batch_size))
   call MPI_Comm_free(node_comm, ierr)
 
