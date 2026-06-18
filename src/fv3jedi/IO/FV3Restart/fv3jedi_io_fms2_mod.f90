@@ -2226,6 +2226,7 @@ if (update_d_wind_restart) then
 
   counts_u_write = counts_u
   counts_v_write = counts_v
+  ! Avoid duplicate writes on shared D-grid edges; keep +1 edge only on global boundaries.
   if (geom%jec < geom%npy-1) counts_u_write(2) = counts_u_write(2) - 1
   if (geom%iec < geom%npx-1) counts_v_write(1) = counts_v_write(1) - 1
 endif
