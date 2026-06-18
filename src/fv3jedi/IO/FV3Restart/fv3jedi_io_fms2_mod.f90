@@ -1524,7 +1524,7 @@ integer :: start_u(3), counts_u(3), start_v(3), counts_v(3)
 integer :: edge_start(3), edge_count(3)
 character(len=64)  :: datefile
 real(kind=kind_real) :: io_unscaling_factor
-real(kind=8) :: timer_start, timer_end
+real(kind=8) :: timer_start, timer_end, d_wind_total_start
 integer :: dimids(4), oldMode
 integer, dimension(:), allocatable :: chunksizes
 
@@ -2430,6 +2430,7 @@ if (write_comm /= MPI_COMM_NULL) then
   call MPI_Info_free(info,ierr)
 endif ! write_comm
 if (update_d_wind_restart) then
+  d_wind_total_start = MPI_Wtime()
   rstflag_backup = rstflag
   my_var_index_backup = my_var_index
   ntotallev_backup = ntotallev
@@ -2494,12 +2495,18 @@ if (update_d_wind_restart) then
   d_wind_read_fields(2)%jec = geom%jec
   d_wind_read_fields(2)%npz = geom%npz
   allocate(d_wind_read_fields(2)%array(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  timer_start = MPI_Wtime()
   call read_restart_fields_reg(self, geom, d_wind_read_fields, field_io_names, field_io_scaling)
+  timer_end = MPI_Wtime()
+  if (rank == 0) then
+    write(*,'(A,F10.3,A)') 'fv3jedi_io_fms_mod.write_restart_all_reg: D-wind read ua/va time = ', &
+                           timer_end - timer_start, ' s'
+  endif
   ua_bkg = d_wind_read_fields(1)%array
   va_bkg = d_wind_read_fields(2)%array
 
   deallocate(d_wind_read_fields)
-  allocate(d_wind_read_fields(1))
+  allocate(d_wind_read_fields(2))
   d_wind_read_fields(1)%long_name = 'eastward_wind'
   d_wind_read_fields(1)%isc = geom%isc
   d_wind_read_fields(1)%iec = geom%iec
@@ -2507,28 +2514,30 @@ if (update_d_wind_restart) then
   d_wind_read_fields(1)%jec = geom%jec
   d_wind_read_fields(1)%npz = geom%npz
   allocate(d_wind_read_fields(1)%array(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
+  d_wind_read_fields(2)%long_name = 'northward_wind'
+  d_wind_read_fields(2)%isc = geom%isc
+  d_wind_read_fields(2)%iec = geom%iec
+  d_wind_read_fields(2)%jsc = geom%jsc
+  d_wind_read_fields(2)%jec = geom%jec
+  d_wind_read_fields(2)%npz = geom%npz
+  allocate(d_wind_read_fields(2)%array(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
   d_wind_field_io_names = field_io_names
   call d_wind_field_io_names%set('eastward_wind', 'u')
-  call read_restart_fields_reg(self, geom, d_wind_read_fields, d_wind_field_io_names, field_io_scaling)
-  ud_bkg(:, geom%jsc:geom%jec, :) = d_wind_read_fields(1)%array
-
-  deallocate(d_wind_read_fields)
-  allocate(d_wind_read_fields(1))
-  d_wind_read_fields(1)%long_name = 'northward_wind'
-  d_wind_read_fields(1)%isc = geom%isc
-  d_wind_read_fields(1)%iec = geom%iec
-  d_wind_read_fields(1)%jsc = geom%jsc
-  d_wind_read_fields(1)%jec = geom%jec
-  d_wind_read_fields(1)%npz = geom%npz
-  allocate(d_wind_read_fields(1)%array(geom%isc:geom%iec, geom%jsc:geom%jec, geom%npz))
-  d_wind_field_io_names = field_io_names
   call d_wind_field_io_names%set('northward_wind', 'v')
+  timer_start = MPI_Wtime()
   call read_restart_fields_reg(self, geom, d_wind_read_fields, d_wind_field_io_names, field_io_scaling)
-  vd_bkg(geom%isc:geom%iec, :, :) = d_wind_read_fields(1)%array
+  timer_end = MPI_Wtime()
+  if (rank == 0) then
+    write(*,'(A,F10.3,A)') 'fv3jedi_io_fms_mod.write_restart_all_reg: D-wind read u/v interior time = ', &
+                           timer_end - timer_start, ' s'
+  endif
+  ud_bkg(:, geom%jsc:geom%jec, :) = d_wind_read_fields(1)%array
+  vd_bkg(geom%isc:geom%iec, :, :) = d_wind_read_fields(2)%array
 
   edge_start = (/ geom%isc, geom%jec+1, 1 /)
   edge_count = (/ size(u_edge,1), 1, size(u_edge,3) /)
 
+  timer_start = MPI_Wtime()
   call check(nf90_open(trim(core_filename), ior(NF90_NOWRITE, NF90_MPIIO), ncid_core, &
              comm=geom%f_comm%communicator(), info=MPI_INFO_NULL))
   call check(nf90_inq_varid(ncid_core, 'u', varid_u))
@@ -2541,6 +2550,11 @@ if (update_d_wind_restart) then
   edge_count = (/ 1, size(v_edge,2), size(v_edge,3) /)
   call check(nf90_get_var(ncid_core, varid_v, v_edge, start=edge_start, count=edge_count))
   call check(nf90_close(ncid_core))
+  timer_end = MPI_Wtime()
+  if (rank == 0) then
+    write(*,'(A,F10.3,A)') 'fv3jedi_io_fms_mod.write_restart_all_reg: D-wind read staggered edges time = ', &
+                           timer_end - timer_start, ' s'
+  endif
 
   ud_bkg(:, geom%jec+1, :) = u_edge(:, 1, :)
   vd_bkg(geom%iec+1, :, :) = v_edge(1, :, :)
@@ -2548,16 +2562,16 @@ if (update_d_wind_restart) then
   dua = ua_ana - ua_bkg
   dva = va_ana - va_bkg
 
+  timer_start = MPI_Wtime()
   if (self%use_d_to_a_inverse_for_D_wind_restart_output) then
-    timer_start = MPI_Wtime()
     call d_to_a_inverse(geom, dua, dva, dud, dvd)
-    timer_end = MPI_Wtime()
-    if (rank == 0) then
-      write(*,'(A,F10.3,A)') 'fv3jedi_io_fms_mod.write_restart_all_reg: d_to_a_inverse time = ', &
-                             timer_end - timer_start, ' s'
-    endif
   else
     call a_to_d(geom, dua, dva, dud, dvd)
+  endif
+  timer_end = MPI_Wtime()
+  if (rank == 0) then
+    write(*,'(A,F10.3,A)') 'fv3jedi_io_fms_mod.write_restart_all_reg: D-wind transform time = ', &
+                           timer_end - timer_start, ' s'
   endif
 
   ud_out = ud_bkg + dud
@@ -2568,6 +2582,7 @@ if (update_d_wind_restart) then
   start_v  = (/ geom%isc, geom%jsc, 1 /)
   counts_v = (/ size(vd_bkg,1), size(vd_bkg,2), size(vd_bkg,3) /)
 
+  timer_start = MPI_Wtime()
   call check(nf90_open(trim(core_filename), ior(NF90_WRITE, NF90_MPIIO), ncid_core, &
              comm=geom%f_comm%communicator(), info=MPI_INFO_NULL))
   call check( nf90_inq_varid(ncid_core, 'u', varid_u) )
@@ -2577,6 +2592,13 @@ if (update_d_wind_restart) then
   call check( nf90_var_par_access(ncid_core, varid_v, nf90_independent) )
   call check( nf90_put_var(ncid_core, varid_v, vd_out, start=start_v, count=counts_v) )
   call check(nf90_close(ncid_core))
+  timer_end = MPI_Wtime()
+  if (rank == 0) then
+    write(*,'(A,F10.3,A)') 'fv3jedi_io_fms_mod.write_restart_all_reg: D-wind write u/v time = ', &
+                           timer_end - timer_start, ' s'
+    write(*,'(A,F10.3,A)') 'fv3jedi_io_fms_mod.write_restart_all_reg: D-wind total update time = ', &
+                           timer_end - d_wind_total_start, ' s'
+  endif
 
   rstflag = rstflag_backup
   my_var_index = my_var_index_backup
