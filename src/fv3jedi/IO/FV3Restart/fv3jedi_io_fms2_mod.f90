@@ -2160,9 +2160,9 @@ if (update_d_wind_restart) then
   if (.not. hasfield(fields, 'eastward_wind') .or. .not. hasfield(fields, 'northward_wind')) then
     call abor1_ftn('fv3jedi_io_fms_mod.write_restart_all_reg: l_D_wind_restart_output requires eastward_wind and northward_wind')
   endif
-!  core_filename = trim(self%datapath)//'/'//trim(self%filenames(self%index_core))
-  core_filename = trim(FileNamesToProcess(core_fileid))
-  do i = 1, totalnumfiles
+  core_filename = trim(self%datapath)//'/'//trim(self%filenames(self%index_core))
+  core_fileid = 0
+  do i = 1, size(FileNamesToProcess)
     if (trim(FileNamesToProcess(i)) == trim(core_filename)) core_fileid = i
   enddo
   if (core_fileid <= 0) then
