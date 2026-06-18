@@ -1520,6 +1520,7 @@ integer                      :: nn, write_rank
 integer :: startloc(4), countloc(4)
 integer :: start(3), counts(3)
 integer :: start_u(3), counts_u(3), start_v(3), counts_v(3)
+integer :: counts_u_write(3), counts_v_write(3)
 character(len=64)  :: datefile
 real(kind=kind_real) :: io_unscaling_factor
 real(kind=8) :: timer_start, timer_end
@@ -2195,6 +2196,10 @@ if (update_d_wind_restart) then
   call check(nf90_inq_varid(ncid_core, trim(va_name), varid_va))
   call check(nf90_inq_varid(ncid_core, 'u', varid_u))
   call check(nf90_inq_varid(ncid_core, 'v', varid_v))
+  call check(nf90_var_par_access(ncid_core, varid_ua, nf90_independent))
+  call check(nf90_var_par_access(ncid_core, varid_va, nf90_independent))
+  call check(nf90_var_par_access(ncid_core, varid_u,  nf90_independent))
+  call check(nf90_var_par_access(ncid_core, varid_v,  nf90_independent))
   call check(nf90_get_var(ncid_core, varid_ua, ua_bkg, start=start,   count=counts))
   call check(nf90_get_var(ncid_core, varid_va, va_bkg, start=start,   count=counts))
   call check(nf90_get_var(ncid_core, varid_u,  ud_bkg, start=start_u, count=counts_u))
@@ -2218,6 +2223,11 @@ if (update_d_wind_restart) then
 
   ud_out = ud_bkg + dud
   vd_out = vd_bkg + dvd
+
+  counts_u_write = counts_u
+  counts_v_write = counts_v
+  if (geom%jec < geom%npy-1) counts_u_write(2) = counts_u_write(2) - 1
+  if (geom%iec < geom%npx-1) counts_v_write(1) = counts_v_write(1) - 1
 endif
 
 if (write_comm /= MPI_COMM_NULL) then
@@ -2486,11 +2496,11 @@ if (update_d_wind_restart) then
 
   call check( nf90_inq_varid(ncid_core, 'u', varid_u) )
   call check( nf90_var_par_access(ncid_core, varid_u, nf90_independent) )
-  call check( nf90_put_var(ncid_core, varid_u, ud_out, start=start_u, count=counts_u) )
+  call check( nf90_put_var(ncid_core, varid_u, ud_out, start=start_u, count=counts_u_write) )
 
   call check( nf90_inq_varid(ncid_core, 'v', varid_v) )
   call check( nf90_var_par_access(ncid_core, varid_v, nf90_independent) )
-  call check( nf90_put_var(ncid_core, varid_v, vd_out, start=start_v, count=counts_v) )
+  call check( nf90_put_var(ncid_core, varid_v, vd_out, start=start_v, count=counts_v_write) )
 
   call check(nf90_close(ncid_core))
 endif
